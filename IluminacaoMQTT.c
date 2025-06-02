@@ -20,6 +20,7 @@
 #define JOYSTICK_Y 27
 #define WS2812_PIN 7
 #define BUZZER_PIN 21
+#define LED_RED 13
 #define IS_RGBW false
 //////////
 #define NUM_AREAS 10
@@ -40,7 +41,7 @@ uint buzzer_slice;
 // Configurações de rede
 #define WIFI_SSID "PRF"                  // Substitua pelo nome da sua rede Wi-Fi
 #define WIFI_PASSWORD "@hfs0800"      // Substitua pela senha da sua rede Wi-Fi
-#define MQTT_SERVER "192.168.1.12"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
+#define MQTT_SERVER "192.168.1.7"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
 #define MQTT_USERNAME "leo"     // Substitua pelo nome da host MQTT - Username
 #define MQTT_PASSWORD "leo"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
 
@@ -149,6 +150,13 @@ static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg);
 static void atualizar_display(){
     char buffer[32];
     ssd1306_fill(&ssd, false);
+
+        //Bordas
+    ssd1306_rect(&ssd, 0, 0, 128, 64, true, false);
+    ssd1306_rect(&ssd, 1, 1, 128 - 2, 64 - 2, true, false);
+    ssd1306_rect(&ssd, 2, 2, 128 - 4, 64 - 4, true, false);
+    ssd1306_rect(&ssd, 3, 3, 128 - 6, 64 - 6, true, false);
+    
     sprintf(buffer, "Area %d", area_atual);
     ssd1306_draw_string(&ssd, buffer, 10, 10);
     sprintf(buffer, "Luz: %d%%", areas[area_atual].luminosidade);
@@ -166,18 +174,20 @@ static void atualizar_leds(){
     }
 }
 
-static void verificar_presenca(int eixo_y){
-    int distancia = abs(eixo_y - 2048);
+static void verificar_presenca(int eixo_x){
+    int distancia = abs(eixo_x - 2048);
     if(distancia < 500){
-        if (to_ms_since_boot(get_absolute_time()) - tempo_ultima_atividade > 2000){
+        if(to_ms_since_boot(get_absolute_time()) - tempo_ultima_atividade > 2000){
             if(!economia){
                 economia = true;
+                gpio_put(LED_RED, 1);   //Ativar LED vermelho para o modo de economia
                 atualizar_leds(); // Apaga LED ao entrar em economia
             }
         }
     }else{
         if(economia){
             economia = false;
+            gpio_put(LED_RED, 0);
             atualizar_leds(); // Liga LED ao sair da economia
         }
         tempo_ultima_atividade = to_ms_since_boot(get_absolute_time());
@@ -191,16 +201,25 @@ static void buzzer_beep(uint16_t tempo_ms){
     pwm_set_enabled(buzzer_slice, false);
 }
 
-//Ao trocar de área, publicar luminosidade para sincronizar com o app MQTT
+//Ao trocar de área, publicar luminosidade de cada area referente, para ter controle de cada area
 static void publicar_luminosidade(MQTT_CLIENT_DATA_T* state){
     char payload[8];
     snprintf(payload, sizeof(payload), "%d", areas[area_atual].luminosidade);
-    mqtt_publish(state->mqtt_client_inst, full_topic(state, "/luminosidade"), payload, strlen(payload), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    char buffer[32];
+    sprintf(buffer, "/pico/luminosidade/area%d", area_atual);
+
+    mqtt_publish(state->mqtt_client_inst, full_topic(state, buffer), payload, strlen(payload), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
 }
 
 //////////////////////////////////////////////////////////////////////
 // --- Inicializa periféricos usados ---
 static void init_perifericos(){
+    //Inicializa LED
+    gpio_init(LED_RED);
+    gpio_set_dir(LED_RED, GPIO_OUT);
+    gpio_put(LED_RED, 0);
+
+    //Inicializa ADC
     adc_init();
     adc_gpio_init(JOYSTICK_Y);
 
@@ -248,29 +267,28 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
 
     DEBUG_printf("Topic: %s, Message: %s\n", state->topic, state->data);
 
-    if(strcmp(basic_topic, "/luminosidade") == 0){
+    //Recebe aqui em /pico/luminosidade para depois publicar em cada topico separado por area
+    if(strcmp(basic_topic, "/pico/luminosidade") == 0){
         int valor = atoi(state->data);
-        if (valor >= 0 && valor <= 100) {
+        if (valor >= 0 && valor <= 100){
             areas[area_atual].luminosidade = valor;
             atualizar_leds();
-            atualizar_display();
+            publicar_luminosidade(state);
         }
-    }else if (strcmp(basic_topic, "/alarme") == 0){
+    }else if (strcmp(basic_topic, "/pico/alarme") == 0){
         if(strcmp(state->data, "on") == 0 || strcmp(state->data, "On") == 0){
             alarme_disparado = true;
         }else{
             alarme_disparado = false;
             pwm_set_enabled(buzzer_slice, false);
         }
-    }else if(strcmp(basic_topic, "/areaprox") == 0){
+    }else if(strcmp(basic_topic, "/pico/areaprox") == 0){
         area_atual = (area_atual + 1) % NUM_AREAS;
         atualizar_leds();
-        atualizar_display();
         publicar_luminosidade(state);  // Publica nova luminosidade no slider
-    }else if(strcmp(basic_topic, "/areaanter") == 0){
+    }else if(strcmp(basic_topic, "/pico/areaanter") == 0){
         area_atual = (area_atual == 0) ? NUM_AREAS - 1 : area_atual - 1;
         atualizar_leds();
-        atualizar_display();
         publicar_luminosidade(state);  // Publica nova luminosidade no slider
     }else if(strcmp(basic_topic, "/exit") == 0){
         state->stop_client = true;
@@ -278,13 +296,16 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     }
 }
 
-// --- Tópicos de assinatura ---
+// --- Tópicos de assinatura --- SUBSCRIBE
 static void sub_unsub_topics(MQTT_CLIENT_DATA_T* state, bool sub){
+    char buffer[32];
+    sprintf(buffer, "/pico/luminosidade/area%d", area_atual);
+
     mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/luminosidade"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/alarme"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/areaanter"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/areaprox"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/pico/luminosidade"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/pico/alarme"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/pico/areaanter"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/pico/areaprox"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
     mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/exit"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
 }
 
@@ -367,19 +388,19 @@ int main(void){
     }
 
     // Loop principal
-    while (!state.connect_done || mqtt_client_is_connected(state.mqtt_client_inst)) {
+    while(!state.connect_done || mqtt_client_is_connected(state.mqtt_client_inst)){
         cyw43_arch_poll();
 
         adc_select_input(1); // Canal do joystick Y
-        int eixo_y = adc_read();
-        verificar_presenca(eixo_y);
+        int eixo_x = adc_read();
+        verificar_presenca(eixo_x);
 
-        if (alarme_disparado) {
+        if(alarme_disparado){
             pwm_set_enabled(buzzer_slice, true);
             sleep_ms(200);
             pwm_set_enabled(buzzer_slice, false);
             sleep_ms(800);
-        } else {
+        }else{
             sleep_ms(300);
         }
     }
@@ -438,24 +459,19 @@ static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len
 // Conexão MQTT
 static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
     MQTT_CLIENT_DATA_T* state = (MQTT_CLIENT_DATA_T*)arg;
-    if (status == MQTT_CONNECT_ACCEPTED) {
+    if (status == MQTT_CONNECT_ACCEPTED){
         state->connect_done = true;
         sub_unsub_topics(state, true); // subscribe;
 
         // indicate online
-        if (state->mqtt_client_info.will_topic) {
+        if(state->mqtt_client_info.will_topic) {
             mqtt_publish(state->mqtt_client_inst, state->mqtt_client_info.will_topic, "1", 1, MQTT_WILL_QOS, true, pub_request_cb, state);
         }
-
-        // Publish temperature every 10 sec if it's changed
-        //temperature_worker.user_data = state;
-        //async_context_add_at_time_worker_in_ms(cyw43_arch_async_context(), &temperature_worker, 0);
-    } else if (status == MQTT_CONNECT_DISCONNECTED) {
-        if (!state->connect_done) {
+    }else if(status == MQTT_CONNECT_DISCONNECTED){
+        if(!state->connect_done){
             panic("Failed to connect to mqtt server");
         }
-    }
-    else {
+    }else{
         panic("Unexpected status");
     }
 }
@@ -490,12 +506,12 @@ static void start_client(MQTT_CLIENT_DATA_T *state) {
 }
 
 // Call back com o resultado do DNS
-static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg) {
+static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg){
     MQTT_CLIENT_DATA_T *state = (MQTT_CLIENT_DATA_T*)arg;
-    if (ipaddr) {
+    if(ipaddr){
         state->mqtt_server_address = *ipaddr;
         start_client(state);
-    } else {
+    }else{
         panic("dns request failed");
     }
 }

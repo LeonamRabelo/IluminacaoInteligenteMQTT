@@ -28,6 +28,6 @@
 #endif // MQTT_CERT_INC
 
 // This defaults to 4
-#define MQTT_REQ_MAX_IN_FLIGHT 5
+#define MQTT_REQ_MAX_IN_FLIGHT 20
 
 #endif
