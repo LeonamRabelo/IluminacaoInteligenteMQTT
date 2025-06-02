@@ -146,6 +146,7 @@ static void start_client(MQTT_CLIENT_DATA_T *state);
 // Call back com o resultado do DNS
 static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg);
 
+static void publicar_modoeconomia(MQTT_CLIENT_DATA_T* state);
 //////////////////////////////////////////////////////////////////////
 static void atualizar_display(){
     char buffer[32];
@@ -209,6 +210,12 @@ static void publicar_luminosidade(MQTT_CLIENT_DATA_T* state){
     sprintf(buffer, "/pico/luminosidade/area%d", area_atual);
 
     mqtt_publish(state->mqtt_client_inst, full_topic(state, buffer), payload, strlen(payload), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+}
+
+static void publicar_modoeconomia(MQTT_CLIENT_DATA_T* state){
+    char payload[8];
+    (economia) ? snprintf(payload, sizeof(payload), "%s", "on") : snprintf(payload, sizeof(payload), "%s", "off");  //condição ternaria para o payload
+    mqtt_publish(state->mqtt_client_inst, full_topic(state, "/pico/modoeconomia"), payload, strlen(payload), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -285,11 +292,17 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     }else if(strcmp(basic_topic, "/pico/areaprox") == 0){
         area_atual = (area_atual + 1) % NUM_AREAS;
         atualizar_leds();
-        publicar_luminosidade(state);  // Publica nova luminosidade no slider
+        //Publica o valor da nova área no tópico do slider
+        char payload[8];
+        snprintf(payload, sizeof(payload), "%d", areas[area_atual].luminosidade);
+        mqtt_publish(state->mqtt_client_inst, full_topic(state, "/pico/luminosidade"), payload, strlen(payload), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
     }else if(strcmp(basic_topic, "/pico/areaanter") == 0){
         area_atual = (area_atual == 0) ? NUM_AREAS - 1 : area_atual - 1;
         atualizar_leds();
-        publicar_luminosidade(state);  // Publica nova luminosidade no slider
+        //Publica o valor da nova área no tópico do slider
+        char payload[8];
+        snprintf(payload, sizeof(payload), "%d", areas[area_atual].luminosidade);
+        mqtt_publish(state->mqtt_client_inst, full_topic(state, "/pico/luminosidade"), payload, strlen(payload), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
     }else if(strcmp(basic_topic, "/exit") == 0){
         state->stop_client = true;
         sub_unsub_topics(state, false);
@@ -298,9 +311,6 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
 
 // --- Tópicos de assinatura --- SUBSCRIBE
 static void sub_unsub_topics(MQTT_CLIENT_DATA_T* state, bool sub){
-    char buffer[32];
-    sprintf(buffer, "/pico/luminosidade/area%d", area_atual);
-
     mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
     mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/pico/luminosidade"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
     mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/pico/alarme"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
@@ -386,6 +396,10 @@ int main(void){
     } else if (err != ERR_INPROGRESS) { // ERR_INPROGRESS means expect a callback
         panic("dns request failed");
     }
+    bool economia_publicado = false;
+    publicar_modoeconomia(&state);
+
+    publicar_luminosidade(&state);  // publica valor inicial da área ativa
 
     // Loop principal
     while(!state.connect_done || mqtt_client_is_connected(state.mqtt_client_inst)){
@@ -394,6 +408,10 @@ int main(void){
         adc_select_input(1); // Canal do joystick Y
         int eixo_x = adc_read();
         verificar_presenca(eixo_x);
+        if(economia != economia_publicado){
+        publicar_modoeconomia(&state);
+        economia_publicado = economia;
+        }
 
         if(alarme_disparado){
             pwm_set_enabled(buzzer_slice, true);
