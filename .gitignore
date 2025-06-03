@@ -2,4 +2,3 @@ build
 .vscode
 pico_sdk_import.cmake
 CLIENTE_MQTT.png
-CMakeLists.txt
