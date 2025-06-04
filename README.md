@@ -78,6 +78,11 @@ O display OLED mostra:
 * Armazenamento local da última configuração
 * Controle via dashboard web
 
+## Ilustração do IOT MQTT Panel e tela do termux
+
+![MQTT Panel](iotmqttpanel.png)
+![Termux](termux.png)
+
 ## Autor
 
 Implementado por Leonam S. Rabelo.
